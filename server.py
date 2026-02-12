@@ -1,93 +1,140 @@
-from flask import Flask, request, render_template_string
+import os
 import sqlite3
-from datetime import datetime
+from pathlib import Path
+from flask import Flask, request
 
 app = Flask(__name__)
-DB = "kartony.db"
 
-# Tworzenie bazy jeśli nie istnieje
+# =========================
+# BAZA DANYCH (SQLite)
+# =========================
+# Na Render najlepiej trzymać DB w katalogu aplikacji.
+# Uwaga: na darmowym planie Render instancja może być resetowana, więc dane mogą zniknąć po restarcie.
+APP_DIR = Path(__file__).resolve().parent
+DB_PATH = APP_DIR / "kartony.db"
+
+
+def db_connect():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def init_db():
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute("""
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS kartony (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            grupa TEXT,
-            modelkolor TEXT,
-            karton INTEGER,
-            data TEXT
+            grupa TEXT NOT NULL,
+            modelkolor TEXT NOT NULL,
+            karton TEXT NOT NULL,
+            data TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-    """)
+        """
+    )
     conn.commit()
     conn.close()
 
-# Strona główna
-@app.route("/", methods=["GET"])
-def index():
-    return render_template_string("""
+
+# Utwórz tabelę od razu przy starcie aplikacji (to naprawia błąd "no such table: kartony")
+init_db()
+
+
+# =========================
+# STRONA GŁÓWNA (FORMULARZ)
+# =========================
+@app.get("/")
+def home():
+    return """
     <html>
-    <head>
-        <title>System Kartonów TS</title>
+      <head>
         <meta name="viewport" content="width=device-width, initial-scale=1">
-    </head>
-    <body style="font-family: Arial; text-align:center; margin-top:40px;">
-        <h2>System Kartonów TS</h2>
-        <form method="post" action="/scan">
-            <p>Grupa:</p>
-            <input name="grupa" required style="font-size:20px;"><br><br>
-            <p>ModelKolor:</p>
-            <input name="model" required autofocus style="font-size:20px;"><br><br>
-            <button type="submit" style="font-size:20px; padding:10px 20px;">Skanuj</button>
+        <title>System Kartonów TS</title>
+      </head>
+      <body style="font-family: Arial; text-align:center; margin-top:60px;">
+        <h1>System Kartonów TS</h1>
+
+        <form method="POST" action="/scan">
+          <div style="margin:16px;">
+            <div style="margin-bottom:6px;">Grupa:</div>
+            <input name="grupa" style="width:260px; height:28px; font-size:16px;" />
+          </div>
+
+          <div style="margin:16px;">
+            <div style="margin-bottom:6px;">ModelKolor:</div>
+            <input name="modelkolor" style="width:260px; height:28px; font-size:16px;" />
+          </div>
+
+          <button type="submit" style="width:120px; height:40px; font-size:16px;">Skanuj</button>
         </form>
-    </body>
+
+      </body>
     </html>
-    """)
+    """
 
-# Obsługa skanowania
-@app.route("/scan", methods=["POST"])
+
+# =========================
+# SKAN (POST)
+# =========================
+@app.route("/scan", methods=["POST", "GET"])
 def scan():
-    grupa = request.form["grupa"].strip().upper()
-    model = request.form["model"].strip().upper()
+    # Jeśli ktoś wejdzie GETem w /scan, odsyłamy na stronę główną
+    if request.method == "GET":
+        return home()
 
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
+    grupa = (request.form.get("grupa") or "").strip()
+    model = (request.form.get("modelkolor") or "").strip()
 
-    # Sprawdź czy modelkolor już istnieje
-    c.execute("SELECT karton FROM kartony WHERE grupa=? AND modelkolor=?", (grupa, model))
-    row = c.fetchone()
+    if not grupa or not model:
+        return """
+        <html><body style="font-family: Arial; text-align:center; margin-top:60px;">
+            <h2 style="color:red;">Brak danych</h2>
+            <p>Uzupełnij pola: Grupa oraz ModelKolor</p>
+            <a href="/" style="font-size:18px;">Wróć</a>
+        </body></html>
+        """, 400
+
+    conn = db_connect()
+    cur = conn.cursor()
+
+    # Jeśli masz mapowanie w bazie (grupa + modelkolor -> karton), to to pobieramy:
+    cur.execute(
+        "SELECT karton FROM kartony WHERE grupa = ? AND modelkolor = ? ORDER BY id DESC LIMIT 1",
+        (grupa, model),
+    )
+    row = cur.fetchone()
 
     if row:
-        karton = row[0]
+        karton = row["karton"]
     else:
-        # Pobierz ostatni karton w grupie
-        c.execute("SELECT MAX(karton) FROM kartony WHERE grupa=?", (grupa,))
-        last = c.fetchone()[0]
-        karton = 1 if last is None else last + 1
-
-        # Zapisz nowe przypisanie
-        c.execute("""
-            INSERT INTO kartony (grupa, modelkolor, karton, data)
-            VALUES (?,?,?,?)
-        """, (grupa, model, karton, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-        conn.commit()
+        # Jeśli nie ma wpisu w bazie, dajemy czytelny komunikat
+        karton = "BRAK W BAZIE"
 
     conn.close()
 
     return f"""
     <html>
-    <head>
+      <head>
         <meta name="viewport" content="width=device-width, initial-scale=1">
-    </head>
-    <body style="font-family: Arial; text-align:center; margin-top:60px;">
-        <h1 style="font-size:60px; color:red;">KARTON NR: {karton}</h1>
-        <p style="font-size:20px;">Grupa: {grupa}</p>
-        <p style="font-size:20px;">ModelKolor: {model}</p>
-        <br>
-        <a href="/" style="font-size:20px;">Nowy skan</a>
-    </body>
+        <title>Wynik skanu</title>
+      </head>
+      <body style="font-family: Arial; text-align:center; margin-top:60px;">
+        <h1 style="font-size:56px; color:#cc0000;">KARTON: {karton}</h1>
+        <p style="font-size:22px;">Grupa: <b>{grupa}</b></p>
+        <p style="font-size:22px;">ModelKolor: <b>{model}</b></p>
+        <br/>
+        <a href="/" style="font-size:22px;">Nowy skan</a>
+      </body>
     </html>
     """
 
+
+# =========================
+# START (LOCAL)
+# Render używa PORT z env, więc to tylko dla lokalnego uruchomienia
+# =========================
 if __name__ == "__main__":
-    init_db()
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port)
