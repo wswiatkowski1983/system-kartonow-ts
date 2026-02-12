@@ -19,19 +19,16 @@ def init_db():
     conn = db_connect()
     cur = conn.cursor()
 
+    # tabela mapowania
     cur.execute("""
         CREATE TABLE IF NOT EXISTS kartony (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             grupa TEXT NOT NULL,
             modelkolor TEXT NOT NULL,
             karton TEXT NOT NULL,
-            data TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            data TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(grupa, modelkolor)
         )
-    """)
-
-    cur.execute("""
-        CREATE UNIQUE INDEX IF NOT EXISTS ux_kartony_grupa_model
-        ON kartony(grupa, modelkolor)
     """)
 
     conn.commit()
@@ -75,7 +72,8 @@ def home():
         <form method="POST" action="/scan">
             <div style="margin:12px;">
                 <div>Grupa:</div>
-                <input id="grupa" name="grupa" style="width:260px; height:32px; font-size:18px;" />
+                <input id="grupa" name="grupa"
+                       style="width:260px; height:32px; font-size:18px;" />
             </div>
 
             <div style="margin:12px;">
@@ -91,22 +89,19 @@ def home():
         </form>
 
         <script>
-            // Zapamiętaj grupę w przeglądarce
             const grupaInput = document.getElementById("grupa");
             const modelInput = document.getElementById("modelkolor");
 
-            // Wczytaj zapisaną grupę
+            // zapamiętaj grupę
             const saved = localStorage.getItem("grupa");
             if(saved){
                 grupaInput.value = saved;
             }
 
-            // Zapisuj przy zmianie
             grupaInput.addEventListener("input", function(){
                 localStorage.setItem("grupa", grupaInput.value);
             });
 
-            // Fokus zawsze na pole skanowania
             window.onload = function(){
                 modelInput.focus();
             }
@@ -128,9 +123,10 @@ def scan():
     conn = db_connect()
     cur = conn.cursor()
 
+    # sprawdz czy już istnieje przypisanie
     cur.execute(
-        "SELECT karton FROM kartony WHERE grupa = ? AND modelkolor = ? LIMIT 1",
-        (grupa, model),
+        "SELECT karton FROM kartony WHERE grupa = ? AND modelkolor = ?",
+        (grupa, model)
     )
     row = cur.fetchone()
 
@@ -138,11 +134,19 @@ def scan():
         karton = row["karton"]
     else:
         karton = next_karton_for_group(cur, grupa)
-        cur.execute(
-            "INSERT INTO kartony (grupa, modelkolor, karton) VALUES (?, ?, ?)",
-            (grupa, model, karton),
-        )
-        conn.commit()
+        try:
+            cur.execute(
+                "INSERT INTO kartony (grupa, modelkolor, karton) VALUES (?, ?, ?)",
+                (grupa, model, karton),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError:
+            # jeśli w międzyczasie ktoś dodał
+            cur.execute(
+                "SELECT karton FROM kartony WHERE grupa = ? AND modelkolor = ?",
+                (grupa, model)
+            )
+            karton = cur.fetchone()["karton"]
 
     conn.close()
 
@@ -162,3 +166,4 @@ def scan():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
+
